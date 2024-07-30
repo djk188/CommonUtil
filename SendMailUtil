@@ -1,0 +1,345 @@
+package com.itkai.atcommand.util;
+
+import cn.hutool.core.collection.CollectionUtil;
+import cn.hutool.core.thread.ThreadFactoryBuilder;
+import cn.hutool.core.util.ObjectUtil;
+import com.alibaba.fastjson.JSON;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang3.StringUtils;
+
+import javax.activation.DataHandler;
+import javax.activation.DataSource;
+import javax.activation.URLDataSource;
+import javax.mail.*;
+import javax.mail.internet.*;
+import java.io.Serializable;
+import java.io.UnsupportedEncodingException;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.Date;
+import java.util.List;
+import java.util.Properties;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * @author Mike
+ * @date 2024/7/31
+ * @description 邮件发送工具类
+ */
+@Slf4j
+public class SendMailUtil {
+
+    private final static String PROXY_HOST = "http.proxyhost";
+
+    private final static String PROXY_PORT = "http.proxyport";
+
+    /**
+     * 依赖包请导入pom
+     * @param args
+     */
+    public static void main(String[] args) {
+        /**
+
+         <!-- 工具类神器 -->
+         <dependency>
+         <groupId>cn.hutool</groupId>
+         <artifactId>hutool-all</artifactId>
+         <version>5.8.8</version>
+         </dependency>
+         <!--邮件工具类 -->
+         <dependency>
+         <groupId>javax.mail</groupId>
+         <artifactId>mail</artifactId>
+         <version>1.4.7</version>
+         </dependency>
+         <!--setter getter 工具 -->
+         <dependency>
+         <groupId>org.projectlombok</groupId>
+         <artifactId>lombok</artifactId>
+         </dependency>
+         <!--io工具类 -->
+         <dependency>
+         <groupId>commons-io</groupId>
+         <artifactId>commons-io</artifactId>
+         <version>1.3.2</version>
+         </dependency>
+
+         <dependency>
+         <groupId>org.projectlombok</groupId>
+         <artifactId>lombok</artifactId>
+         <optional>true</optional>
+         </dependency>
+
+
+         */
+    }
+
+    /**
+     * 邮件有时候发送很慢所以使用线程池异步发送
+     */
+    private static final ThreadPoolExecutor THREAD_POOL_EXECUTOR = new ThreadPoolExecutor(
+            4, 8, 60, TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(20),
+            new ThreadFactoryBuilder().setNamePrefix("normal-mail-thread").setThreadFactory(Executors.defaultThreadFactory()).build());
+
+    /**
+     * 邮件发送的方法
+     *
+     * @param dto 发送参数
+     * @return 成功或失败
+     */
+    public static boolean send(SendMailParamDTO dto) throws Exception {
+        log.info(" send mail parameter:{}", JSON.toJSONString(dto));
+
+        // 创建邮件发送配置
+        final Properties props = new Properties();
+        props.put("mail.smtp.auth", "true");
+        props.put("mail.smtp.host", dto.getHost());
+        props.put("mail.smtp.port", dto.getSendPort());
+
+        // 设置代理主机(无外网nginx做代理时候使用)
+        if (StringUtils.isNotEmpty(dto.getProxyHost())) {
+            props.setProperty(PROXY_HOST, dto.getProxyHost());
+        }
+        // 设置代理端口(无外网nginx做代理时候使用)
+        if (StringUtils.isNotEmpty(dto.getProxyPort())) {
+            props.setProperty(PROXY_PORT, dto.getProxyPort());
+        }
+        // ssl协议认证（常用端口一般是 465 ）
+        if (ObjectUtil.isNotNull(dto.getUseSsl()) && dto.getUseSsl()) {
+            props.put("mail.smtp.ssl.enable", "true");
+            props.put("mail.smtp.socketFactory.class", "javax.net.ssl.SSLSocketFactory");
+            props.put("mail.smtp.socketFactory.port", dto.getSendPort());
+        }
+        // tls协议认证 （常用端口一般是 587）
+        if (ObjectUtil.isNotNull(dto.getUseTls()) && dto.getUseTls()) {
+            props.put("mail.smtp.starttls.enable", "true");
+            props.put("mail.smtp.ssl.trust", "*");
+        }
+
+        // 构建授权信息，用于进行SMTP进行身份验证
+        Authenticator authenticator = new Authenticator() {
+            @Override
+            protected PasswordAuthentication getPasswordAuthentication() {
+                // 用户名、密码
+                String userName = dto.getServerMail();
+                String password = dto.getServerPassword();
+                return new PasswordAuthentication(userName, password);
+            }
+        };
+
+        // 使用环境属性和授权信息，创建邮件会话
+        Session session = Session.getInstance(props, authenticator);
+        // 关闭调试模式（开启会打印邮件调用日志）
+        session.setDebug(ObjectUtil.isNotEmpty(dto.getDebugPattern()) && dto.getDebugPattern());
+
+        InternetAddress[] toAddressArray = InternetAddress.parse(dto.getToUser(), true);
+
+        // 第三步：创建邮件消息体
+        MimeMessage message = new MimeMessage(session);
+
+        String nickName = "";
+        // 发件人昵称（可以自定义）
+        if (StringUtils.isNotEmpty(dto.getNickName())) {
+            try {
+                nickName += MimeUtility.encodeText(dto.getNickName());
+            } catch (UnsupportedEncodingException e) {
+                e.printStackTrace();
+            }
+        }
+        // 一般是发件人邮箱地址
+        if (StringUtils.isNotEmpty(dto.getFromUser())) {
+            nickName += " <" + dto.getFromUser() + ">";
+        }
+
+        //设置自定义发件人昵称
+        if (StringUtils.isNotEmpty(nickName)) {
+            message.setFrom(new InternetAddress(nickName));
+        }
+        // 邮件的主题
+        message.setSubject(dto.getSubject());
+        //收件人
+        message.addRecipients(Message.RecipientType.TO, toAddressArray);
+
+        // 创建一个MimeMultipart对象
+        MimeMultipart multipart = new MimeMultipart();
+
+        // 添加邮件正文内容部分（支持文本和富文本以及html代码）
+        MimeBodyPart contentPart = new MimeBodyPart();
+        contentPart.setContent(dto.getContent(), "text/html;charset=utf-8");
+        multipart.addBodyPart(contentPart);
+
+        // 添加附件部分（图片或者文件）
+        if (CollectionUtil.isNotEmpty(dto.getAttachmentList())) {
+            log.info("add attachment start ...");
+            dto.getAttachmentList().forEach(item -> {
+                if (StringUtils.isNotEmpty(item.getFileUrl())) {
+                    MimeBodyPart attachmentPart = new MimeBodyPart();
+                    // 文件路径可以自定义
+                    DataSource source = null;
+                    try {
+                        source = new URLDataSource(new URL(item.getFileUrl()));
+                        attachmentPart.setDataHandler(new DataHandler(source));
+                        if (StringUtils.isNotEmpty(item.getFileName())) {
+                            // 添加文件后缀名（附件没有传入文件名使用）
+                            String fileName = addFileNameExtension(item.getFileName(), source.getName());
+                            // 防止中文文件名乱码 (读取自定义文件名)
+                            attachmentPart.setFileName(MimeUtility.encodeText(fileName));
+                        } else {
+                            // 防止中文文件名乱码 (读取默认文件名)
+                            attachmentPart.setFileName(MimeUtility.encodeText(source.getName()));
+                        }
+                        multipart.addBodyPart(attachmentPart);
+                    } catch (MalformedURLException | MessagingException | UnsupportedEncodingException e) {
+                        log.error("add attachment failed, please check the attachment format:{0}", e);
+                    }
+                }
+            });
+        }
+        // 将multipart对象放到message中
+        message.setContent(multipart);
+        // 邮件发送时间
+        message.setSentDate(new Date());
+
+        // 这里发送很慢、一般需要5,6秒（公共服务器、私有邮件服务器除外）
+        THREAD_POOL_EXECUTOR.execute(() -> {
+            try {
+                Transport.send(message);
+                log.info("send mail finish ...");
+            } catch (MessagingException e) {
+                log.error("send mail fail:{0}", e);
+            }
+        });
+        return true;
+    }
+
+    /**
+     * 获取默认发送文件名
+     */
+    private static String addFileNameExtension(String fileName, String sourceName) {
+        String extName = FilenameUtils.getExtension(fileName);
+        if (StringUtils.isEmpty(extName)) {
+            String extSourceName = FilenameUtils.getExtension(sourceName);
+            return fileName.endsWith(".") ? fileName.concat(extSourceName) : fileName.concat(".").concat(extSourceName);
+        }
+        return fileName;
+    }
+
+
+    /**
+     * 邮件发送工具类参数
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class SendMailParamDTO implements Serializable {
+        private static final long serialVersionUID = 7290903700032915299L;
+
+        /**
+         * 接收人邮箱
+         */
+        private String toUser;
+
+
+        /**
+         * 发送人邮箱
+         */
+        private String fromUser;
+
+        /**
+         * 发送标题
+         */
+        private String subject;
+
+        /**
+         * 发送内容
+         */
+        private String content;
+
+        /**
+         * 附件
+         */
+        private List<MailAttachmentDTO> attachmentList;
+
+
+        /**
+         * 发送别名（昵称）
+         */
+        private String nickName;
+
+        /**
+         * 发送主机
+         */
+        private String host;
+
+        /**
+         * 发送端口
+         */
+        private String sendPort;
+
+        /**
+         * 发送者邮箱
+         */
+        private String serverMail;
+
+        /**
+         * 发送者密码
+         */
+        private String serverPassword;
+
+        /**
+         * 使用ssl加密模式
+         */
+        private Boolean useSsl;
+
+        /**
+         * 使用Tls协议模式
+         */
+        private Boolean useTls;
+
+        /**
+         * 代理主机
+         */
+        private String proxyHost;
+
+        /**
+         * 代理端口
+         */
+        private String proxyPort;
+
+        /**
+         * 是否开启debug模式
+         */
+        private Boolean debugPattern;
+    }
+
+    /**
+     * 附件参数
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class MailAttachmentDTO implements Serializable {
+        private static final long serialVersionUID = -5482965045215145191L;
+
+        /**
+         * 附件名称
+         */
+        private String fileName;
+
+        /**
+         * 附件地址
+         */
+        private String fileUrl;
+    }
+
+}
