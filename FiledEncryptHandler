@@ -1,0 +1,163 @@
+package com.itkai.atcommand.mybatis;
+
+import cn.hutool.extra.spring.SpringUtil;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.ibatis.type.BaseTypeHandler;
+import org.apache.ibatis.type.JdbcType;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.sql.CallableStatement;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Base64;
+
+/**
+ * @author Mike
+ * @date 2024/8/1 19:24
+ * @description 数据库字段脱敏、目前该类支持mybatis-plus 3.4以上版本
+ */
+@Slf4j
+public class FiledEncryptHandler extends BaseTypeHandler<String> {
+
+    /**
+        POM依赖
+         <dependency>
+         <groupId>com.baomidou</groupId>
+         <artifactId>mybatis-plus-boot-starter</artifactId>
+         <version>3.4.3.4</version>
+         <scope>provided</scope>
+         </dependency>
+         <dependency>
+         <groupId>com.baomidou</groupId>
+         <artifactId>mybatis-plus-extension</artifactId>
+         <version>3.4.3.4</version>
+         <scope>provided</scope>
+         </dependency>
+
+     */
+
+    /**
+     * 设置非空参数进行加密、插入时候出发或者查询参数时触发
+     */
+    @Override
+    public void setNonNullParameter(PreparedStatement ps, int i, String parameter, JdbcType jdbcType) throws SQLException {
+        String value = parameter;
+        // 判断加密是否开启，没加密直接返回
+        if (needEncrypt()) {
+            ps.setString(i, value);
+            return;
+        }
+        try {
+            // 解密工具类
+            value = AesGcmUtils.encrypt(parameter);
+        } catch (Exception e) {
+            log.warn("该密码不是无法解密");
+        }
+        // 解密之后数据或者是原始值
+        ps.setString(i, value);
+    }
+
+    /**
+     * 解密方式加密的字段
+     */
+    @Override
+    public String getNullableResult(ResultSet rs, String columnName) throws SQLException {
+        // 加密未开启配置、开始之后不可关闭
+        if (needEncrypt()) {
+            return rs.getString(columnName);
+        }
+        try {
+            return AesGcmUtils.decrypt(rs.getString(columnName));
+        } catch (Exception e) {
+            return rs.getString(columnName);
+        }
+    }
+
+    @Override
+    public String getNullableResult(ResultSet rs, int columnIndex) throws SQLException {
+        // 加密未开启、开启之后不可关闭】否则无法回显原值
+        if (needEncrypt()) {
+            return rs.getString(columnIndex);
+        }
+        try {
+            return AesGcmUtils.decrypt(rs.getString(columnIndex));
+        } catch (Exception e) {
+            //（如何一开始设计数据库字段就加密可以抛出异常、因为我这里是增量迭代要求加密的所以对原值进行了返回，没有抛异常）
+            return rs.getString(columnIndex);
+        }
+    }
+
+    /**
+     * 实现方式同上
+     * @param cs
+     * @param columnIndex
+     * @return
+     * @throws SQLException
+     */
+    @Override
+    public String getNullableResult(CallableStatement cs, int columnIndex) throws SQLException {
+        // 加密未开启
+        if (needEncrypt()) {
+            return cs.getString(columnIndex);
+        }
+        try {
+            return AesGcmUtils.decrypt(cs.getString(columnIndex));
+        } catch (Exception e) {
+            //（如何一开始设计数据库字段就加密可以抛出异常、因为我这里是增量迭代要求加密的所以对原值进行了返回，没有抛异常）
+            return cs.getString(columnIndex);
+        }
+    }
+
+    private boolean needEncrypt() {
+        // 这里支持动态获取加密是否开启、一旦开启不能关闭，否则会到导致无法回显正常值
+        String needEncrypt = SpringUtil.getProperty("sensitive.encrypt");
+        // 加密未开启
+        return !StringUtils.isEmpty(needEncrypt) && !Boolean.parseBoolean(needEncrypt);
+    }
+
+    public static class AesGcmUtils {
+
+        private static final String TRANSFORMATION = "AES/GCM/NoPadding";
+        private static final int TAG_LENGTH_BIT = 128;
+
+        /**
+         * 加密方法
+         */
+        public static String encrypt(String data) throws Exception {
+            if(StringUtils.isEmpty(data)){
+                return data;
+            }
+            Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+            GCMParameterSpec parameterSpec = new GCMParameterSpec(TAG_LENGTH_BIT, getIv());
+            cipher.init(Cipher.ENCRYPT_MODE, getKey(), parameterSpec);
+            return Base64.getEncoder().encodeToString(cipher.doFinal(data.getBytes()));
+        }
+
+        /**
+         * 解密方法
+         */
+        public static String decrypt(String encryptedData) throws Exception {
+            if(StringUtils.isEmpty(encryptedData)){
+                return encryptedData;
+            }
+            Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+            GCMParameterSpec parameterSpec = new GCMParameterSpec(TAG_LENGTH_BIT, getIv());
+            cipher.init(Cipher.DECRYPT_MODE, getKey(), parameterSpec);
+            return new String(cipher.doFinal(Base64.getDecoder().decode(encryptedData)));
+        }
+
+        private static byte[] getIv() {
+            String ivStr = SpringUtil.getProperty("aes.iv");
+            return ivStr.getBytes();
+        }
+
+        private static SecretKeySpec getKey() {
+            String key = SpringUtil.getProperty("aes.key");
+            return new SecretKeySpec(key.getBytes(), "AES");
+        }
+    }
+}
